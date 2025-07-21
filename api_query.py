@@ -9,12 +9,11 @@ import faiss
 from transformers import pipeline
 import json
 import os
-from google.colab import files
+from pathlib import Path
+import tempfile
+from werkzeug.utils import secure_filename
 
-# Install dependencies (run this once if not already installed)
-!pip install PyPDF2 python-docx sentence-transformers faiss-cpu transformers
-
-# Initialize models
+# Initialize models (load once to avoid repeated downloads)
 embedder = SentenceTransformer('all-MiniLM-L6-v2')
 qa_pipeline = pipeline('question-answering', model='bert-large-uncased-whole-word-masking-finetuned-squad')
 
@@ -50,22 +49,17 @@ def extract_text_from_txt(file_path):
 # Split text into clauses with better section preservation
 def split_into_clauses(text):
     clauses = []
-    # Split by section headers (e.g., "Section 1: Introduction")
     sections = re.split(r'(Section \d+[^\n]*\n)', text)
     current_section = ""
     for i in range(1, len(sections), 2):
         section_title = sections[i].strip()
         section_content = sections[i+1].strip()
         clauses.append(section_title)
-        # Split content by paragraphs, preserving lists
         paragraphs = section_content.split('\n\n')
         for para in paragraphs:
-            # Check if paragraph is a list (starts with - or •)
             if para.strip().startswith(('-', '•')):
-                # Keep the entire list as one clause
                 clauses.append(f"{section_title} {para.strip()}")
             else:
-                # Split non-list paragraphs into sentences
                 sentences = re.split(r'(?<=[.!?])\s+', para.strip())
                 for sentence in sentences:
                     if sentence.strip():
@@ -89,23 +83,19 @@ def process_query(query, clauses, index, embeddings, k=5):
 
 # Generate answer and rationale using LLM
 def generate_answer(query, clauses):
-    # Process each clause individually to avoid truncation
     answers = []
     scores = []
     for clause in clauses:
-        # Truncate clause to 400 tokens to stay within model limits
         tokens = clause.split()[:400]
         context = " ".join(tokens)
         result = qa_pipeline(question=query, context=context)
         answers.append(result['answer'])
         scores.append(result['score'])
     
-    # Select the answer with the highest score
     max_score_idx = np.argmax(scores)
     best_answer = answers[max_score_idx]
     best_score = scores[max_score_idx]
     
-    # Combine relevant information for a comprehensive answer
     if "knee surgery" in query.lower():
         coverage = ""
         conditions = []
@@ -122,9 +112,37 @@ def generate_answer(query, clauses):
     rationale = f"The answer is based on the following relevant clauses: {', '.join(clauses[:2])}. The model confidence is {best_score:.2f}."
     return best_answer, rationale
 
-# Main function to handle query
+# Main handler for Vercel
+def handler(request):
+    if request.method == 'POST':
+        # Handle file upload
+        if 'file' not in request.files:
+            return json.dumps({"error": "No file part in the request"}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return json.dumps({"error": "No file selected for uploading"}), 400
+        
+        if file:
+            # Save the uploaded file temporarily
+            filename = secure_filename(file.filename)
+            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{filename.split('.')[-1]}") as temp_file:
+                file.save(temp_file.name)
+                document_path = temp_file.name
+            
+            # Process the file
+            query = "Does this policy cover knee surgery, and what are the conditions?"
+            result = handle_query(query, document_path)
+            
+            # Clean up temporary file
+            os.unlink(document_path)
+            
+            return json.dumps(result, indent=4), 200
+    else:
+        return json.dumps({"error": "Method not allowed. Use POST with a file upload."}), 405
+
+# Local test function (optional)
 def handle_query(query, document_path):
-    # Extract text based on file type
     ext = os.path.splitext(document_path)[1].lower()
     if ext == '.pdf':
         text = extract_text_from_pdf(document_path)
@@ -137,15 +155,11 @@ def handle_query(query, document_path):
     else:
         raise ValueError("Unsupported file type")
 
-    # Process document
     clauses = split_into_clauses(text)
     index, embeddings = build_faiss_index(clauses)
-    
-    # Process query
     relevant_clauses, distances = process_query(query, clauses, index, embeddings)
     answer, rationale = generate_answer(query, relevant_clauses)
     
-    # Structure output
     result = {
         "query": query,
         "answer": answer,
@@ -154,22 +168,3 @@ def handle_query(query, document_path):
         "rationale": rationale
     }
     return result
-
-# Example usage with dynamic file input
-if __name__ == "__main__":
-    print("Please upload your policy file (.txt, .pdf, .docx, or .eml)")
-    uploaded = files.upload()  # Prompt user to upload a file
-    if not uploaded:
-        raise ValueError("No file uploaded")
-    
-    # Get the uploaded file's name
-    document_path = list(uploaded.keys())[0]
-    print(f"Processing file: {document_path}")
-    
-    query = "Does this policy cover knee surgery, and what are the conditions?"
-    result = handle_query(query, document_path)
-    
-    # Save result as JSON
-    with open("query_result.json", "w") as f:
-        json.dump(result, f, indent=4)
-    print(json.dumps(result, indent=4))
