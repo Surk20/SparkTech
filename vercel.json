@@ -1,0 +1,15 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "api_query.py",
+      "use": "@vercel/python"
+    }
+  ],
+  "functions": {
+    "api/query.py": {
+      "memory": 1024,  // Increase to 1024MB to handle large models
+      "maxDuration": 60 // Increase to 60 seconds for processing
+    }
+  }
+}
