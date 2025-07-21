@@ -1,0 +1,1 @@
+PyPDF2 python-docx sentence-transformers faiss-cpu transformers numpy pandas
