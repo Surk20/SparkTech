@@ -14,37 +14,54 @@ import tempfile
 from werkzeug.utils import secure_filename
 
 # Initialize models (load once to avoid repeated downloads)
-embedder = SentenceTransformer('all-MiniLM-L6-v2')
-qa_pipeline = pipeline('question-answering', model='bert-large-uncased-whole-word-masking-finetuned-squad')
+try:
+    embedder = SentenceTransformer('all-MiniLM-L6-v2')
+    qa_pipeline = pipeline('question-answering', model='bert-large-uncased-whole-word-masking-finetuned-squad')
+except Exception as e:
+    print(f"Model initialization failed: {str(e)}")
+    embedder = None
+    qa_pipeline = None
 
 # Document parsing functions
 def extract_text_from_pdf(file_path):
-    with open(file_path, 'rb') as file:
-        reader = PyPDF2.PdfReader(file)
-        text = ""
-        for page in reader.pages:
-            text += page.extract_text() + "\n"
-        return text
+    try:
+        with open(file_path, 'rb') as file:
+            reader = PyPDF2.PdfReader(file)
+            text = ""
+            for page in reader.pages:
+                text += page.extract_text() + "\n"
+            return text
+    except Exception as e:
+        raise ValueError(f"Failed to extract text from PDF: {str(e)}")
 
 def extract_text_from_docx(file_path):
-    doc = docx.Document(file_path)
-    return "\n".join([para.text for para in doc.paragraphs])
+    try:
+        doc = docx.Document(file_path)
+        return "\n".join([para.text for para in doc.paragraphs])
+    except Exception as e:
+        raise ValueError(f"Failed to extract text from DOCX: {str(e)}")
 
 def extract_text_from_email(file_path):
-    with open(file_path, 'r') as file:
-        msg = email.message_from_file(file)
-        text = ""
-        if msg.is_multipart():
-            for part in msg.walk():
-                if part.get_content_type() == 'text/plain':
-                    text += part.get_payload(decode=True).decode()
-        else:
-            text = msg.get_payload(decode=True).decode()
-        return text
+    try:
+        with open(file_path, 'r') as file:
+            msg = email.message_from_file(file)
+            text = ""
+            if msg.is_multipart():
+                for part in msg.walk():
+                    if part.get_content_type() == 'text/plain':
+                        text += part.get_payload(decode=True).decode()
+            else:
+                text = msg.get_payload(decode=True).decode()
+            return text
+    except Exception as e:
+        raise ValueError(f"Failed to extract text from EML: {str(e)}")
 
 def extract_text_from_txt(file_path):
-    with open(file_path, 'r', encoding='utf-8') as file:
-        return file.read()
+    try:
+        with open(file_path, 'r', encoding='utf-8') as file:
+            return file.read()
+    except Exception as e:
+        raise ValueError(f"Failed to extract text from TXT: {str(e)}")
 
 # Split text into clauses with better section preservation
 def split_into_clauses(text):
@@ -114,35 +131,44 @@ def generate_answer(query, clauses):
 
 # Main handler for Vercel
 def handler(request):
-    if request.method == 'POST':
-        # Handle file upload
-        if 'file' not in request.files:
-            return json.dumps({"error": "No file part in the request"}), 400
-        
-        file = request.files['file']
-        if file.filename == '':
-            return json.dumps({"error": "No file selected for uploading"}), 400
-        
-        if file:
-            # Save the uploaded file temporarily
-            filename = secure_filename(file.filename)
-            with tempfile.NamedTemporaryFile(delete=False, suffix=f".{filename.split('.')[-1]}") as temp_file:
-                file.save(temp_file.name)
-                document_path = temp_file.name
+    try:
+        if request.method == 'POST':
+            if 'file' not in request.files:
+                return json.dumps({"error": "No file part in the request"}), 400
             
-            # Process the file
-            query = "Does this policy cover knee surgery, and what are the conditions?"
-            result = handle_query(query, document_path)
+            file = request.files['file']
+            if file.filename == '':
+                return json.dumps({"error": "No file selected for uploading"}), 400
             
-            # Clean up temporary file
-            os.unlink(document_path)
-            
-            return json.dumps(result, indent=4), 200
-    else:
-        return json.dumps({"error": "Method not allowed. Use POST with a file upload."}), 405
+            if file:
+                # Save the uploaded file temporarily
+                filename = secure_filename(file.filename)
+                with tempfile.NamedTemporaryFile(delete=False, suffix=f".{filename.split('.')[-1]}") as temp_file:
+                    file.save(temp_file.name)
+                    document_path = temp_file.name
+                
+                # Process the file
+                query = "Does this policy cover knee surgery, and what are the conditions?"
+                result = handle_query(query, document_path)
+                
+                # Clean up temporary file
+                os.unlink(document_path)
+                
+                # Ensure all fields are JSON-serializable
+                result["relevant_clauses"] = [str(clause).replace('\n', ' ') for clause in result["relevant_clauses"]]
+                result["rationale"] = result["rationale"].replace('\n', ' ')
+                
+                return json.dumps(result, ensure_ascii=False), 200
+        else:
+            return json.dumps({"error": "Method not allowed. Use POST with a file upload."}), 405
+    except Exception as e:
+        return json.dumps({"error": f"Internal server error: {str(e)}"}), 500
 
 # Local test function (optional)
 def handle_query(query, document_path):
+    if embedder is None or qa_pipeline is None:
+        raise ValueError("Models failed to initialize")
+    
     ext = os.path.splitext(document_path)[1].lower()
     if ext == '.pdf':
         text = extract_text_from_pdf(document_path)
